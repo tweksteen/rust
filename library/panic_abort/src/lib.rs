@@ -19,6 +19,8 @@
 #![feature(rustc_attrs)]
 #![feature(asm)]
 
+use alloc::boxed::Box;
+use alloc::string::String;
 use core::any::Any;
 use core::panic::BoxMeUp;
 
@@ -28,9 +30,32 @@ pub unsafe extern "C" fn __rust_panic_cleanup(_: *mut u8) -> *mut (dyn Any + Sen
     unreachable!()
 }
 
-// "Leak" the payload and shim to the relevant abort on the platform in question.
+#[rustc_std_internal_symbol]
+unsafe fn format_payload(payload: *mut &mut dyn BoxMeUp) -> String {
+    let payload = Box::from_raw((*payload).take_box());
+    let msg = match payload.downcast_ref::<&'static str>() {
+        Some(s) => String::from(*s),
+        None => match payload.downcast_ref::<String>() {
+            Some(s) => String::from(s),
+            None => String::from("<unsupported panic payload type>"),
+        },
+    };
+    return msg
+}
+
+// Use the relevant abort on the platform in question.
 #[rustc_std_internal_symbol]
 pub unsafe extern "C" fn __rust_start_panic(_payload: *mut &mut dyn BoxMeUp) -> u32 {
+    // Android has the ability to attach a message as part of the abort.
+    #[cfg(target_os = "android")]
+    {
+        // std::ffi::CString is not available here. Use alloc::vec to create the char* argument.
+        // Manually append the final null byte.
+        let mut msg = format_payload(_payload).into_bytes();
+        msg.push(0);
+        libc::android_set_abort_message(msg.as_ptr() as *const libc::c_char);
+    }
+
     abort();
 
     cfg_if::cfg_if! {
